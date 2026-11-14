@@ -128,17 +128,24 @@ class OptionChainAnalyzer:
         # Detect header row index
         header_idx = -1
         header_cols: List[str] = []
-        for i, line in enumerate(lines[:10]):
-            cols = [c.strip().lower() for c in next(csv.reader([line]))]
-            if any("strike" in c for c in cols):
+        parsed_lines = [list(csv.reader([l]))[0] for l in lines[:10]]
+        for i, cols in enumerate(parsed_lines):
+            cols_lower = [c.strip().lower() for c in cols]
+            if any("strike" in c for c in cols_lower):
                 header_idx = i
-                header_cols = cols
+                header_cols = cols_lower
                 break
 
+        # If next line also contains 'strike', that is the actual column names line (e.g. multi-header NSE format)
+        if header_idx != -1 and header_idx + 1 < len(parsed_lines):
+            next_cols = [c.strip().lower() for c in parsed_lines[header_idx + 1]]
+            if any("strike" in c for c in next_cols):
+                header_idx += 1
+                header_cols = next_cols
+
         if header_idx == -1:
-            # Fallback to line 0 if no header found
             header_idx = 0
-            header_cols = [c.strip().lower() for c in next(csv.reader([lines[0]]))]
+            header_cols = [c.strip().lower() for c in parsed_lines[0]]
 
         # Check if this is an NSE standard 23-column format:
         # CE columns on left, Strike in middle, PE columns on right
@@ -149,8 +156,40 @@ class OptionChainAnalyzer:
                 break
 
         is_nse_symmetric = False
+        ce_oi_idx = 0
+        ce_chg_idx = 1
+        ce_ltp_idx = 4
+        pe_oi_idx = -1
+        pe_chg_idx = -1
+        pe_ltp_idx = -1
+
         if strike_col_idx is not None and strike_col_idx > 3 and (len(header_cols) - strike_col_idx) > 3:
             is_nse_symmetric = True
+            for i in range(strike_col_idx):
+                cn = "".join(c for c in header_cols[i] if c.isalnum())
+                if cn in ("oi", "openinterest") and ce_oi_idx == 0:
+                    ce_oi_idx = i
+                elif ("chg" in cn or "change" in cn) and "oi" in cn:
+                    ce_chg_idx = i
+                elif "ltp" in cn or "lastprice" in cn:
+                    ce_ltp_idx = i
+
+            for i in range(strike_col_idx + 1, len(header_cols)):
+                cn = "".join(c for c in header_cols[i] if c.isalnum())
+                if cn in ("oi", "openinterest"):
+                    pe_oi_idx = i
+                elif ("chg" in cn or "change" in cn) and "oi" in cn:
+                    pe_chg_idx = i
+                elif ("ltp" in cn or "lastprice" in cn) and pe_ltp_idx == -1:
+                    pe_ltp_idx = i
+
+            non_empty = [idx for idx in range(strike_col_idx + 1, len(header_cols)) if header_cols[idx].strip()]
+            if pe_oi_idx == -1 and non_empty:
+                pe_oi_idx = non_empty[-1]
+            if pe_chg_idx == -1 and len(non_empty) >= 2:
+                pe_chg_idx = non_empty[-2]
+            if pe_ltp_idx == -1 and len(non_empty) >= 5:
+                pe_ltp_idx = non_empty[-5]
 
         for line_idx in range(header_idx + 1, len(lines)):
             line = lines[line_idx]
@@ -161,24 +200,24 @@ class OptionChainAnalyzer:
             if len(cols) <= max(1, strike_col_idx or 0):
                 continue
 
+            # Skip NSE summary Total row
+            strike_str = cols[strike_col_idx].strip() if strike_col_idx is not None and strike_col_idx < len(cols) else ""
+            if not strike_str or strike_str.lower() == "total":
+                continue
+
             try:
                 if is_nse_symmetric and strike_col_idx is not None:
-                    # CE is on the left of Strike, PE is on the right of Strike
                     strike_val = self._clean_num(cols[strike_col_idx])
-                    if strike_val is None:
+                    if strike_val is None or strike_val <= 0:
                         continue
 
-                    # NSE typical CE columns: 0=OI, 1=Chng in OI, 2=Volume, 3=IV, 4=LTP ...
-                    ce_oi = self._clean_num(cols[0]) or 0
-                    ce_chg = self._clean_num(cols[1]) or 0
-                    ce_ltp = self._clean_num(cols[4]) if len(cols) > 4 else 0
+                    ce_oi = (self._clean_num(cols[ce_oi_idx]) if ce_oi_idx < len(cols) else 0) or 0
+                    ce_chg = (self._clean_num(cols[ce_chg_idx]) if ce_chg_idx < len(cols) else 0) or 0
+                    ce_ltp = (self._clean_num(cols[ce_ltp_idx]) if ce_ltp_idx < len(cols) else 0) or 0
 
-                    # NSE typical PE columns: Strike+1=Bid Qty... or from the end
-                    # Usually PE LTP is col Strike+7 (or 16), Chng in OI is Strike+10 (or 19), OI is Strike+11 (or 20)
-                    # Let's inspect column positions relative to total length
-                    pe_oi = self._clean_num(cols[-1]) or 0
-                    pe_chg = self._clean_num(cols[-2]) or 0
-                    pe_ltp = self._clean_num(cols[-5]) if len(cols) >= 5 else 0
+                    pe_oi = (self._clean_num(cols[pe_oi_idx]) if pe_oi_idx < len(cols) else 0) or 0
+                    pe_chg = (self._clean_num(cols[pe_chg_idx]) if pe_chg_idx < len(cols) else 0) or 0
+                    pe_ltp = (self._clean_num(cols[pe_ltp_idx]) if pe_ltp_idx < len(cols) else 0) or 0
 
                     self.raw_rows.append({
                         "strike": strike_val,
