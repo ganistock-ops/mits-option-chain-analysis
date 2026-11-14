@@ -1,0 +1,56 @@
+name: MITS Automated EOD Option Chain Pipeline
+
+on:
+  schedule:
+    # Runs Monday to Friday at 10:30 AM UTC (4:00 PM IST, post-market close)
+    - cron: '30 10 * * 1-5'
+    # Secondary check at 11:30 AM UTC (5:00 PM IST for finalized NSE bhavcopy data)
+    - cron: '30 11 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Underlying Symbol to fetch (e.g., NIFTY, BANKNIFTY)'
+        required: true
+        default: 'NIFTY'
+
+jobs:
+  run-pipeline:
+    name: Fetch EOD Option Chain & Update Analytics
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests curl_cffi
+
+      - name: Execute MITS Option Chain EOD Pipeline
+        run: |
+          SYMBOL="${{ github.event.inputs.symbol || 'NIFTY' }}"
+          echo "Running MITS EOD Option Chain Pipeline for: $SYMBOL"
+          python mits_option_chain_pipeline.py --symbol "$SYMBOL" --output option_chain_summary.json
+
+      - name: Commit and Push Updated Summary
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add option_chain_summary.json
+          if git diff --staged --quiet; then
+            echo "No changes detected in option_chain_summary.json. Skipping commit."
+          else
+            git commit -m "[Auto] Update EOD Option Chain Summary ($SYMBOL) [skip ci]"
+            git push
+          fi
